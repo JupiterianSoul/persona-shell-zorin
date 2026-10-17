@@ -287,13 +287,19 @@ for v in $GL_VARS; do
     if eval "[ -n \"\\\${\$v+x}\" ]"; then eval "export PERSONA_ORIG_\$v=\"\\\$\$v\""; fi
 done
 
+# Nix wrappers prepend to XDG_DATA_DIRS; if it starts empty, the system app list would vanish.
+export XDG_DATA_DIRS="\${XDG_DATA_DIRS:-/usr/local/share:/usr/share:/var/lib/flatpak/exports/share:\$HOME/.local/share/flatpak/exports/share:/var/lib/snapd/desktop}"
+
 exec >"\$HOME/.local/share/persona-shell/session.log" 2>&1
-hypr="\$PS_ENV/bin/start-hyprland"; [ -x "\$hypr" ] || hypr="\$PS_ENV/bin/Hyprland"
+# start-hyprland is Hyprland's crash-restarting launcher. It looks for a "nixGL"
+# command itself, so tell it we already wrap it (--no-nixgl).
+set -- "\$PS_ENV/bin/Hyprland"
+[ -x "\$PS_ENV/bin/start-hyprland" ] && set -- "\$PS_ENV/bin/start-hyprland" --no-nixgl
 nv=\$(ls "\$PS_ENV"/bin/nixGLNvidia-* 2>/dev/null | head -n1)
 if [ -n "\$nv" ]; then
-    exec "\$nv" "\$PS_ENV/bin/nixGLIntel" "\$hypr"
+    exec "\$nv" "\$PS_ENV/bin/nixGLIntel" "\$@"
 else
-    exec "\$PS_ENV/bin/nixGLIntel" "\$hypr"
+    exec "\$PS_ENV/bin/nixGLIntel" "\$@"
 fi
 EOF
 
