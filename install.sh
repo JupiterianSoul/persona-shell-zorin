@@ -227,17 +227,30 @@ cat >"$DATA/flake/flake.nix" <<'NIX'
     in {
       packages.${system} = {
         default = env [ ];
-        nvidia = env [ pkgs.nixgl.auto.nixGLNvidia ];
+        # The installer passes the driver version in: nixGL's own detection can't
+        # read the version line of NVIDIA's open kernel module (RTX 50 series).
+        nvidia = env [ (pkgs.nixgl.nvidiaPackages { version = builtins.getEnv "PERSONA_NVIDIA_VERSION"; }).nixGLNvidia ];
       };
     };
 }
 NIX
-attr=default; [ "$GPU_MODE" = nvidia ] && attr=nvidia
+attr=default
+if [ "$GPU_MODE" = nvidia ]; then
+    attr=nvidia
+    PERSONA_NVIDIA_VERSION=$(cat /sys/module/nvidia/version 2>/dev/null || grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' /proc/driver/nvidia/version | head -n1)
+    export PERSONA_NVIDIA_VERSION
+    ok "Using NVIDIA driver files for version $PERSONA_NVIDIA_VERSION"
+fi
 build=(nix "${NIXF[@]}" build --impure --out-link "$DATA/env" "path:$DATA/flake#$attr")
 if have_tty; then
-    "${build[@]}" 2>/dev/tty || die "downloading Hyprland/Quickshell failed."   # straight to the screen so the progress bar shows
+    # Straight to the screen so the progress bar shows; on failure, run again into the log to keep the error.
+    if ! "${build[@]}" 2>/dev/tty; then
+        printf '\nRetrying once and saving the error to the log...\n'
+        "${build[@]}" -L 2>&1 | tail -n 80 || true
+        "${build[@]}" >/dev/null 2>&1 || die "downloading Hyprland/Quickshell failed."
+    fi
 else
-    "${build[@]}" || die "downloading Hyprland/Quickshell failed."
+    "${build[@]}" -L || die "downloading Hyprland/Quickshell failed."
 fi
 ENV="$DATA/env"
 ok "Hyprland $("$ENV/bin/Hyprland" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo '?') ready"
@@ -365,6 +378,8 @@ cat >"$BIN/persona-shell-update" <<EOF
 # Updates Hyprland, Quickshell and fonts. Run it from normal Zorin, e.g. after an NVIDIA driver update.
 set -e
 . $NIX_PROFILE_SCRIPT
+PERSONA_NVIDIA_VERSION=\$(cat /sys/module/nvidia/version 2>/dev/null || true)
+export PERSONA_NVIDIA_VERSION
 nix --extra-experimental-features "nix-command flakes" flake update --flake "path:$DATA/flake"
 nix --extra-experimental-features "nix-command flakes" build --impure --out-link "$DATA/env" "path:$DATA/flake#$attr"
 cp -rL --no-preserve=mode "$DATA/env/share/fonts/." "\$HOME/.local/share/fonts/persona-shell/" 2>/dev/null || true

@@ -22,6 +22,14 @@ jobs:
           "$D/env/bin/Hyprland" --version
           fc-list | grep -iE 'montserrat|material symbols|jetbrains|symbols nerd' | head
 
+      - name: Build the NVIDIA variant (RTX 50 laptop driver 595.91.07, open kernel module)
+        run: |
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+          PERSONA_NVIDIA_VERSION=595.91.07 nix --extra-experimental-features "nix-command flakes" \
+            build -L --impure --out-link /tmp/nv "path:$HOME/.local/share/persona-shell/flake#nvidia"
+          ls /tmp/nv/bin | grep -E 'nixGL'
+          test -x /tmp/nv/bin/nixGLNvidia-595.91.07
+
       - name: Render the shell in a headless Wayland compositor
         run: |
           sudo apt-get install -y -qq sway grim >/dev/null
