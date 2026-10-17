@@ -25,7 +25,7 @@ NIXF=(--extra-experimental-features "nix-command flakes")
 
 # Graphics variables nixGL sets for Nix programs. Normal Zorin apps must not
 # inherit them, or they can crash on start; persona-run strips them again.
-GL_VARS="LD_LIBRARY_PATH LIBGL_DRIVERS_PATH LIBVA_DRIVERS_PATH GBM_BACKENDS_PATH __EGL_VENDOR_LIBRARY_FILENAMES VK_ICD_FILENAMES VK_LAYER_PATH QT_PLUGIN_PATH QML_IMPORT_PATH QML2_IMPORT_PATH NIXPKGS_QT6_QML_IMPORT_PATH QT_QPA_PLATFORMTHEME"
+GL_VARS="LD_LIBRARY_PATH LIBGL_DRIVERS_PATH LIBVA_DRIVERS_PATH GBM_BACKENDS_PATH __EGL_VENDOR_LIBRARY_FILENAMES __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS VK_ICD_FILENAMES VK_LAYER_PATH QT_PLUGIN_PATH QML_IMPORT_PATH QML2_IMPORT_PATH NIXPKGS_QT6_QML_IMPORT_PATH QT_QPA_PLATFORMTHEME"
 
 # ---------------------------------------------------------------- helpers ----
 
@@ -192,7 +192,12 @@ cat >"$DATA/flake/flake.nix" <<'NIX'
   outputs = { self, nixpkgs, nixgl }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs { inherit system; overlays = [ nixgl.overlays.default ]; };
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ nixgl.overlays.default ];
+        config.allowUnfreePredicate = p: pkgs.lib.hasPrefix "nvidia" (pkgs.lib.getName p);
+      };
+      lib = pkgs.lib;
       qt = pkgs.qt6;
 
       # Persona plays videos, so Quickshell also needs QtMultimedia.
@@ -224,12 +229,40 @@ cat >"$DATA/flake/flake.nix" <<'NIX'
         paths = [ pkgs.hyprland quickshell pkgs.nixgl.nixGLIntel ] ++ fonts ++ extra;
         ignoreCollisions = true;
       };
+
+      # NVIDIA: userspace libraries matching the installed driver, plus a wrapper like
+      # nixGL's nixGLNvidia. nixGL's own version is broken against current nixpkgs
+      # (nvidia_x11 no longer takes `kernel`), and its version detection can't read
+      # the open kernel module's version line (RTX 50 series), so the installer
+      # passes the version in.
+      nvidiaVersion = builtins.getEnv "PERSONA_NVIDIA_VERSION";
+      nvidiaLibs = (pkgs.linuxPackages.nvidia_x11.override {
+        libsOnly = true;
+        disable32Bit = true;
+        firmware = false;
+      }).overrideAttrs (old: {
+        pname = "nvidia-libs";
+        version = nvidiaVersion;
+        name = "nvidia-libs-${nvidiaVersion}";
+        src = builtins.fetchurl "https://download.nvidia.com/XFree86/Linux-x86_64/${nvidiaVersion}/NVIDIA-Linux-x86_64-${nvidiaVersion}.run";
+        patches = [ ];
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.zstd ];
+      });
+      # NVIDIA's EGL platform libraries (GBM for the compositor, Wayland for apps).
+      eglPlatforms = builtins.filter (p: p != null) [ (pkgs.egl-gbm or null) (pkgs.egl-wayland or null) ];
+      nixGLNvidia = pkgs.writeShellScriptBin "nixGLNvidia-${nvidiaVersion}" ''
+        NVIDIA_JSON=(${nvidiaLibs}/share/glvnd/egl_vendor.d/*nvidia.json)
+        export __EGL_VENDOR_LIBRARY_FILENAMES="''${NVIDIA_JSON[*]}''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"
+        export __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS="${lib.concatMapStringsSep ":" (p: "${p}/share/egl/egl_external_platform.d") eglPlatforms}''${__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS:+:$__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS}"
+        export GBM_BACKENDS_PATH="${nvidiaLibs}/lib/gbm''${GBM_BACKENDS_PATH:+:$GBM_BACKENDS_PATH}"
+        export VK_ICD_FILENAMES="${nvidiaLibs}/share/vulkan/icd.d/nvidia_icd.json''${VK_ICD_FILENAMES:+:$VK_ICD_FILENAMES}"
+        export LD_LIBRARY_PATH="${lib.makeLibraryPath ([ nvidiaLibs pkgs.libglvnd ] ++ eglPlatforms)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        exec "$@"
+      '';
     in {
       packages.${system} = {
         default = env [ ];
-        # The installer passes the driver version in: nixGL's own detection can't
-        # read the version line of NVIDIA's open kernel module (RTX 50 series).
-        nvidia = env [ (pkgs.nixgl.nvidiaPackages { version = builtins.getEnv "PERSONA_NVIDIA_VERSION"; }).nixGLNvidia ];
+        nvidia = env [ nixGLNvidia ];
       };
     };
 }
@@ -367,7 +400,8 @@ set -- "\$PS_ENV/bin/Hyprland"
 [ -x "\$PS_ENV/bin/start-hyprland" ] && set -- "\$PS_ENV/bin/start-hyprland" --no-nixgl
 nv=\$(ls "\$PS_ENV"/bin/nixGLNvidia-* 2>/dev/null | head -n1)
 if [ -n "\$nv" ]; then
-    exec "\$nv" "\$PS_ENV/bin/nixGLIntel" "\$@"
+    # Mesa first (it overwrites GBM_BACKENDS_PATH), then NVIDIA adds itself in front.
+    exec "\$PS_ENV/bin/nixGLIntel" "\$nv" "\$@"
 else
     exec "\$PS_ENV/bin/nixGLIntel" "\$@"
 fi
