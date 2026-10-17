@@ -25,7 +25,7 @@ NIXF=(--extra-experimental-features "nix-command flakes")
 
 # Graphics variables nixGL sets for Nix programs. Normal Zorin apps must not
 # inherit them, or they can crash on start; persona-run strips them again.
-GL_VARS="LD_LIBRARY_PATH LIBGL_DRIVERS_PATH LIBVA_DRIVERS_PATH GBM_BACKENDS_PATH __EGL_VENDOR_LIBRARY_FILENAMES __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS VK_ICD_FILENAMES VK_LAYER_PATH QT_PLUGIN_PATH QML_IMPORT_PATH QML2_IMPORT_PATH NIXPKGS_QT6_QML_IMPORT_PATH QT_QPA_PLATFORMTHEME"
+GL_VARS="LD_LIBRARY_PATH LIBGL_DRIVERS_PATH LIBVA_DRIVERS_PATH GBM_BACKENDS_PATH __EGL_VENDOR_LIBRARY_FILENAMES __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS VK_ICD_FILENAMES VK_LAYER_PATH QT_PLUGIN_PATH QML_IMPORT_PATH QML2_IMPORT_PATH NIXPKGS_QT6_QML_IMPORT_PATH QT_QPA_PLATFORMTHEME __NV_PRIME_RENDER_OFFLOAD __VK_LAYER_NV_optimus __GLX_VENDOR_LIBRARY_NAME PERSONA_NVIDIA"
 
 # ---------------------------------------------------------------- helpers ----
 
@@ -398,13 +398,38 @@ exec >"\$HOME/.local/share/persona-shell/session.log" 2>&1
 # command itself, so tell it we already wrap it (--no-nixgl).
 set -- "\$PS_ENV/bin/Hyprland"
 [ -x "\$PS_ENV/bin/start-hyprland" ] && set -- "\$PS_ENV/bin/start-hyprland" --no-nixgl
-nv=\$(ls "\$PS_ENV"/bin/nixGLNvidia-* 2>/dev/null | head -n1)
+# NVIDIA libraries must match the running driver exactly; after a driver update
+# (until persona-shell-update is run) carry on without them rather than break.
+nv=""
+drv=\$(cat /sys/module/nvidia/version 2>/dev/null)
+if [ -n "\$drv" ]; then
+    if [ -x "\$PS_ENV/bin/nixGLNvidia-\$drv" ]; then
+        nv="\$PS_ENV/bin/nixGLNvidia-\$drv"
+        export PERSONA_NVIDIA=1
+    elif ls "\$PS_ENV"/bin/nixGLNvidia-* >/dev/null 2>&1; then
+        echo "NVIDIA driver \$drv does not match Persona's NVIDIA files; run persona-shell-update. Using Intel/AMD graphics only."
+    fi
+fi
 if [ -n "\$nv" ]; then
     # Mesa first (it overwrites GBM_BACKENDS_PATH), then NVIDIA adds itself in front.
     exec "\$PS_ENV/bin/nixGLIntel" "\$nv" "\$@"
 else
     exec "\$PS_ENV/bin/nixGLIntel" "\$@"
 fi
+EOF
+
+cat >"$BIN/persona-qs" <<'EOF'
+#!/bin/sh
+# Starts the Persona shell. On laptops with an NVIDIA card it renders there (PRIME
+# offload) while the screen stays on the Intel/AMD chip, which is far too slow for
+# the shell's animated shaders and videos. Falls back if that fails to start.
+if [ -n "${PERSONA_NVIDIA:-}" ]; then
+    start=$(date +%s)
+    __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia qs -c persona
+    [ $(( $(date +%s) - start )) -ge 10 ] && exit 0
+    echo "Persona shell did not start on the NVIDIA card, using the other graphics chip." >&2
+fi
+exec qs -c persona
 EOF
 
 cat >"$BIN/persona-shell-update" <<EOF
@@ -431,7 +456,7 @@ if grep -qF -- "$MARKER" "$HYPR_CONF" 2>/dev/null; then rm -f "$HYPR_CONF"; fi
 rm -rf "$DATA" "\$HOME/.local/share/fonts/persona-shell"
 rm -f "\$(xdg-user-dir DESKTOP 2>/dev/null || echo "\$HOME/Desktop")/Persona Shell - keys.txt"
 fc-cache -f >/dev/null 2>&1 || true
-rm -f "$BIN/persona-run" "$BIN/persona-hyprland" "$BIN/persona-shell-update"
+rm -f "$BIN/persona-run" "$BIN/persona-hyprland" "$BIN/persona-qs" "$BIN/persona-shell-update"
 # The NVIDIA settings are standard and harmless, so they are kept; only the
 # login-screen override for two-GPU laptops is undone.
 if [ "\$(readlink /etc/udev/rules.d/61-gdm.rules 2>/dev/null)" = /dev/null ]; then
@@ -445,7 +470,7 @@ fi
 rm -f "\$0"
 echo "Done. Persona Shell is gone; log in with 'Zorin Desktop' as usual."
 EOF
-chmod +x "$BIN/persona-run" "$BIN/persona-hyprland" "$BIN/persona-shell-update" "$BIN/persona-shell-uninstall"
+chmod +x "$BIN/persona-run" "$BIN/persona-hyprland" "$BIN/persona-qs" "$BIN/persona-shell-update" "$BIN/persona-shell-uninstall"
 ok "persona-run, persona-hyprland, persona-shell-update, persona-shell-uninstall"
 
 # ------------------------------------------------------ hyprland config ----
@@ -478,7 +503,7 @@ local launcher = "qs -c persona ipc call searchapp toggle"
 
 hl.on("hyprland.start", function()
     hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE HYPRLAND_INSTANCE_SIGNATURE")
-    hl.exec_cmd("qs -c persona")
+    hl.exec_cmd("persona-qs")
     hl.exec_cmd(run .. "mako")
     hl.exec_cmd("[ -x /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 ] && " .. run .. "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1")
     hl.exec_cmd("sleep 4; " .. run .. "notify-send -t 15000 'Persona Shell' 'Super+Space: apps   Super+Enter: terminal   Super+E: files   Alt+F4: close   Super+Shift+E: log out'")
