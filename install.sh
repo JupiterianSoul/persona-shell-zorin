@@ -75,11 +75,37 @@ GPU_MODE=mesa
 gpus=$(lspci 2>/dev/null | grep -Ei 'vga|3d controller|display' || true)
 if grep -qi nvidia <<<"$gpus" && [ -r /proc/driver/nvidia/version ]; then
     GPU_MODE=nvidia
-    warn "NVIDIA graphics with the NVIDIA driver found. This usually works but is the least tested setup."
-    if [ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" != Y ]; then
-        warn "The NVIDIA driver is not in the mode Hyprland needs (nvidia-drm modeset is off)."
-        warn "Hyprland will probably not start. Ask for help before continuing."
-        ask "Continue anyway?" || exit 0
+    ok "Graphics: NVIDIA with the NVIDIA driver $(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' /proc/driver/nvidia/version | head -n1)"
+
+    # Hyprland needs nvidia-drm modeset, and the login screen (GDM) hides Wayland
+    # desktops on NVIDIA unless sleep support is set up the way its udev rule checks.
+    nv_issues=()
+    [ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" = Y ] || nv_issues+=("driver mode for Wayland (nvidia-drm modeset) is off")
+    if ! grep -q '^EnableS0ixPowerManagement: 1' /proc/driver/nvidia/params 2>/dev/null; then
+        grep -q '^PreserveVideoMemoryAllocations: 1' /proc/driver/nvidia/params 2>/dev/null || nv_issues+=("video memory is not kept during sleep")
+        for s in suspend resume hibernate; do
+            [ "$(systemctl is-enabled "nvidia-$s.service" 2>/dev/null)" = enabled ] || { nv_issues+=("NVIDIA sleep services are off"); break; }
+        done
+    fi
+    # Laptops with Intel/AMD + NVIDIA graphics: GDM always hides Wayland desktops unless its rule is overridden.
+    NV_HYBRID=""
+    if ls /sys/class/power_supply/BAT* >/dev/null 2>&1 && grep -viq nvidia <<<"$gpus" \
+        && grep -qs hybrid_nvidia /usr/lib/udev/rules.d/61-gdm.rules /lib/udev/rules.d/61-gdm.rules \
+        && [ ! -e /etc/udev/rules.d/61-gdm.rules ]; then
+        NV_HYBRID=1
+        nv_issues+=("the login screen hides Wayland desktops on laptops with two graphics chips")
+    fi
+
+    if [ ${#nv_issues[@]} -gt 0 ]; then
+        warn "Some NVIDIA settings need to change before Persona Shell can start:"
+        for i in "${nv_issues[@]}"; do printf '      - %s\n' "$i"; done
+        printf '    The installer can change them for you. The computer then needs one restart.\n'
+        if ask "Change the NVIDIA settings for you?"; then
+            NV_FIX=1
+        else
+            warn "Without these changes Persona Shell will most likely not start or not show up at login."
+            ask "Continue anyway?" || exit 0
+        fi
     fi
 else
     ok "Graphics: $(sed -E 's/^[^:]*: //' <<<"$gpus" | head -n1)"
@@ -103,6 +129,37 @@ for p in brightnessctl playerctl pulseaudio-utils libnotify-bin mako-notifier po
         warn "$p not available, skipping (only a small feature is lost)."
     fi
 done
+
+if [ -n "${NV_FIX:-}" ]; then
+    step "Changing the NVIDIA settings"
+    sudo tee /etc/modprobe.d/persona-shell-nvidia.conf >/dev/null <<'EOF'
+# Added by the Persona Shell installer: needed for Hyprland and Wayland on NVIDIA.
+options nvidia-drm modeset=1
+options nvidia NVreg_PreserveVideoMemoryAllocations=1
+EOF
+    ok "Driver options set"
+    if [ -f /etc/default/grub ] && ! grep -q 'nvidia-drm.modeset=1' /etc/default/grub; then
+        sudo cp /etc/default/grub /etc/default/grub.bak-persona
+        sudo sed -i -E '/^GRUB_CMDLINE_LINUX_DEFAULT=/ s/"$/ nvidia-drm.modeset=1"/' /etc/default/grub
+        if grep -q 'nvidia-drm.modeset=1' /etc/default/grub && sudo update-grub >/dev/null 2>&1; then
+            ok "Boot option added"
+        else
+            sudo cp /etc/default/grub.bak-persona /etc/default/grub
+            warn "Could not add the boot option (the driver option above should be enough)"
+        fi
+    fi
+    for s in suspend resume hibernate; do
+        sudo systemctl enable "nvidia-$s.service" >/dev/null 2>&1 || warn "could not enable nvidia-$s"
+    done
+    ok "NVIDIA sleep services enabled"
+    if [ -n "$NV_HYBRID" ]; then
+        sudo ln -sf /dev/null /etc/udev/rules.d/61-gdm.rules
+        ok "Login screen allowed to show Wayland desktops"
+    fi
+    sudo update-initramfs -u >/dev/null 2>&1 || warn "update-initramfs had a problem (the restart may still be enough)"
+    ok "Done. These take effect after the restart at the end"
+    NEED_REBOOT=1
+fi
 
 # ------------------------------------------------------------------- nix ----
 
@@ -326,6 +383,11 @@ rm -rf "$DATA" "\$HOME/.local/share/fonts/persona-shell"
 rm -f "\$(xdg-user-dir DESKTOP 2>/dev/null || echo "\$HOME/Desktop")/Persona Shell - keys.txt"
 fc-cache -f >/dev/null 2>&1 || true
 rm -f "$BIN/persona-run" "$BIN/persona-hyprland" "$BIN/persona-shell-update"
+# The NVIDIA settings are standard and harmless, so they are kept; only the
+# login-screen override for two-GPU laptops is undone.
+if [ "\$(readlink /etc/udev/rules.d/61-gdm.rules 2>/dev/null)" = /dev/null ]; then
+    sudo rm -f /etc/udev/rules.d/61-gdm.rules
+fi
 if [ -r $NIX_PROFILE_SCRIPT ]; then
     . $NIX_PROFILE_SCRIPT
     echo "Freeing disk space..."
