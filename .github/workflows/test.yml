@@ -1,0 +1,54 @@
+name: Test install on Ubuntu 24.04 (Zorin 18 base)
+on: [push, workflow_dispatch]
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the installer
+        run: bash install.sh
+
+      - name: Check what it installed
+        run: |
+          set -x
+          D=~/.local/share/persona-shell
+          ls -la ~/.local/bin "$D" "$D/env/bin"
+          cat /usr/share/wayland-sessions/persona-hyprland.desktop
+          cat "$D/verify.log" || true
+          grep -q gaps_in ~/.config/hypr/hyprland.lua   # the full config passed Hyprland's own check
+          "$D/env/bin/Hyprland" --version
+          fc-list | grep -iE 'montserrat|material symbols|jetbrains|symbols nerd' | head
+
+      - name: Render the shell in a headless Wayland compositor
+        run: |
+          sudo apt-get install -y -qq sway grim >/dev/null
+          mkdir -p out
+          export XDG_RUNTIME_DIR=$(mktemp -d); chmod 700 "$XDG_RUNTIME_DIR"
+          printf 'output HEADLESS-1 resolution 1920x1080\n' > sway.conf
+          WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman sway -c sway.conf > out/sway.log 2>&1 &
+          sleep 5
+          export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -m1 -E '^wayland-[0-9]+$')
+          E=~/.local/share/persona-shell/env/bin
+          export LIBGL_ALWAYS_SOFTWARE=1
+          "$E/nixGLIntel" "$E/qs" -c persona > out/qs.log 2>&1 &
+          QS=$!
+          sleep 45; grim out/1-shell.png
+          "$E/nixGLIntel" "$E/qs" -c persona ipc call searchapp toggle || true
+          sleep 8; grim out/2-launcher.png
+          kill $QS || true; sleep 2
+          echo "::group::qs log"; cat out/qs.log; echo "::endgroup::"
+
+          # Best effort: the real session (Hyprland + autostarted shell), nested inside sway.
+          ~/.local/bin/persona-hyprland &
+          sleep 60; grim out/3-hyprland-session.png || true
+          cp ~/.local/share/persona-shell/*.log out/ 2>/dev/null || true
+          echo "::group::session log"; tail -n 150 out/session.log || true; echo "::endgroup::"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results
+          path: out/
