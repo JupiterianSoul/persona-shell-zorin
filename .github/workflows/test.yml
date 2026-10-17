@@ -32,7 +32,7 @@ jobs:
           sleep 5
           export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -m1 -E '^wayland-[0-9]+$')
           E=~/.local/share/persona-shell/env/bin
-          export LIBGL_ALWAYS_SOFTWARE=1
+          export LIBGL_ALWAYS_SOFTWARE=1 XDG_DATA_DIRS=/usr/local/share:/usr/share
           "$E/nixGLIntel" "$E/qs" -c persona > out/qs.log 2>&1 &
           QS=$!
           sleep 45; grim out/1-shell.png
@@ -45,7 +45,9 @@ jobs:
           ~/.local/bin/persona-hyprland &
           sleep 60; grim out/3-hyprland-session.png || true
           cp ~/.local/share/persona-shell/*.log out/ 2>/dev/null || true
+          find "$XDG_RUNTIME_DIR/hypr" -name hyprland.log -exec cp {} out/hyprland.log \; 2>/dev/null || true
           echo "::group::session log"; tail -n 150 out/session.log || true; echo "::endgroup::"
+          echo "::group::hyprland log"; grep -iE 'err|crit|warn|config' out/hyprland.log | tail -n 80 || true; echo "::endgroup::"
 
       - uses: actions/upload-artifact@v4
         if: always()
