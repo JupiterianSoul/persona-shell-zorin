@@ -13,7 +13,7 @@ Open a terminal (Ctrl+Alt+T), paste this, press Enter, and type your password wh
 bash <(curl -fsSL https://raw.githubusercontent.com/JupiterianSoul/persona-shell-zorin/main/install.sh)
 ```
 
-It takes 10–30 minutes (it downloads a few GB). When it says **All done!**:
+It takes 10 to 30 minutes (it downloads a few GB). When it says **All done!**:
 
 1. Log out.
 2. On the login screen, click your name, then the **gear icon** at the bottom right.
